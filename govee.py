@@ -1,57 +1,80 @@
 #!/usr/bin/env python3
 """Tiny Govee LAN helper (UDP JSON on ports 4001/4002/4003).
 
+Reply quirk (verified on H6076): the lamp unicasts its reply back to our IP
+with destination port FIXED at 4002, ignoring the sender's ephemeral port —
+so receive on a socket bound to 4002 and send from any ephemeral socket.
+
 Usage:
-  python govee.py scan                     # find lamps on the LAN
-  python govee.py on   192.168.50.20       # turn on
-  python govee.py off  192.168.50.20       # turn off
-  python govee.py bri  192.168.50.20 60    # brightness 1-100
-  python govee.py rgb  192.168.50.20 255 128 0
-  python govee.py kelv 192.168.50.20 3000
-  python govee.py stat 192.168.50.20       # query state
+  py govee.py scan [<ip> ...]            # find lamps (multicast; add IPs to probe by unicast across VLANs)
+  py govee.py on   <ip>                  # turn on
+  py govee.py off  <ip>                  # turn off
+  py govee.py bri  <ip> 60               # brightness 1-100
+  py govee.py rgb  <ip> 255 128 0        # set color
+  py govee.py kelv <ip> 3000             # set color temperature
+  py govee.py stat <ip>                  # query state
 """
 import json
 import socket
 import sys
+import time
 
 SCAN = {"msg": {"cmd": "scan", "data": {"account_topic": "reserve"}}}
 
 
 def send(ip, payload, port=4003, wait=True):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(2.0)
-    s.sendto(json.dumps(payload).encode(), (ip, port))
-    if wait:
-        try:
-            data, _ = s.recvfrom(4096)
-            return json.loads(data.decode("utf-8", "replace"))
-        except socket.timeout:
-            return None
-    return None
+    """Send one UDP command; collect replies arriving on port 4002."""
+    lsn = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    lsn.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsn.bind(("0.0.0.0", 4002))
+    lsn.settimeout(2.0)
+    snd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    reply = None
+    try:
+        snd.sendto(json.dumps(payload).encode(), (ip, port))
+        if wait:
+            try:
+                data, _ = lsn.recvfrom(4096)
+                reply = json.loads(data.decode("utf-8", "replace"))
+            except socket.timeout:
+                reply = None
+    finally:
+        lsn.close()
+        snd.close()
+    return reply
 
 
-def scan():
+def scan(extra_ips=()):
     found = {}
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("0.0.0.0", 4002))
-    s.settimeout(0.5)
+    lsn = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    lsn.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsn.bind(("0.0.0.0", 4002))
+    lsn.settimeout(0.5)
     m = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    m.sendto(json.dumps(SCAN).encode(), ("239.255.255.250", 4001))
-    import time
+    payload = json.dumps(SCAN).encode()
+    targets = ["239.255.255.250"] + list(extra_ips)
     end = time.time() + 3
     while time.time() < end:
+        for tgt in targets:
+            try:
+                m.sendto(payload, (tgt, 4001))
+            except OSError:
+                pass
         try:
-            data, addr = s.recvfrom(4096)
-            d = json.loads(data.decode("utf-8", "replace")).get("msg", {}).get("data", {})
-            key = d.get("device") or addr[0]
-            found[key] = {"ip": d.get("ip") or addr[0], "sku": d.get("sku", "?")}
+            while True:
+                data, addr = lsn.recvfrom(4096)
+                d = json.loads(data.decode("utf-8", "replace")).get("msg", {}).get("data", {})
+                key = d.get("device") or addr[0]
+                found[key] = {"ip": d.get("ip") or addr[0], "sku": d.get("sku", "?")}
         except socket.timeout:
-            m.sendto(json.dumps(SCAN).encode(), ("239.255.255.250", 4001))
+            pass
+    lsn.close()
+    m.close()
     for k, v in found.items():
         print(f"{v['ip']:>16}  {v['sku']:<12} {k}")
     if not found:
         print("no lamps answered (check 'LAN Control' switch in Govee app)")
+
 
 
 def main():
