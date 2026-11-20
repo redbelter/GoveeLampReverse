@@ -66,6 +66,19 @@ echo -n '{"msg":{"cmd":"devStatus","data":{}}}'            | nc -u -w1 192.168.x
 
 Requires Python with `bleak` for BLE (`py -m pip install bleak`); LAN helper is stdlib-only.
 
+## Community guidance (verified against these lamps)
+
+From `wez/govee-lan-hass`, `wez/govee2mqtt` (FAQ/LAN.md), `homebridge-plugins/homebridge-govee` wiki, `StopBanning/govee-lights`, Govee's official wlan-guide:
+
+- Devices join multicast `239.255.255.250` **only after LAN Control is enabled** — silence on 4001/4003 before the toggle is expected, not a bug. Official fix when the toggle is hidden: power-cycle the lamp, wait ~30 min for the firmware to finish OTA (H6076 needed 1.04.06; a blog with this exact model reported ~1 month), then: kill app → turn phone Wi-Fi OFF → reopen app → device page now shows LAN Control.
+- Docker controllers need `network_mode: host` for multicast discovery. Only one LAN controller per host IP (all bind/reply via UDP 4002).
+- Replies always go to destination port **4002**, not the sender's ephemeral port — bind a listener on 4002.
+- Cross-VLAN/subnet: multicast doesn't cross VLANs; scan by unicast instead (homebridge `lanScanSubnets` CIDR list, `govee2mqtt` `GOVEE_LAN_SCAN=ip1,ip2`). Our `govee.py stat <ip>` is exactly this workaround. Routers may need IGMP snooping enabled for multicast to work at all.
+- Connection tier used by mature bridges: LAN → AWS IoT MQTT (undocumented, needs account creds) → Platform API → BLE last. For BLE-only models, StopBanning/govee-lights keeps one persistent BLE connection per lamp, releases it after ~1 min idle so the phone app can still connect; one connection at a time — a connected lamp stops advertising, so scans while another controller holds the link find nothing.
+- Segment quirk: per-segment frames set brightness/color only, no independent per-segment power. Some SKUs refuse segment brightness 0.
+- Device IDs in Govee logs are supersets of the BLE MAC, not MACs themselves. `"devices not belong you"` from the Platform API = BLE-only device without Wi-Fi support.
+- BLE provisioning notes from `gvetk.com`: 2.4 GHz only (no 5 GHz), password travels plaintext, close the vendor app first (one BLE connection at a time), verify join from the network side.
+
 ## Bluetooth off/on
 
 Radio state is OS-level: enable/disable via WinRT `Windows.Devices.Radios.Radio` (`set_state_async(On)`), or Settings → Bluetooth. The lamp itself has no per-radio toggle; BLE keeps advertising while connected to Wi-Fi.
